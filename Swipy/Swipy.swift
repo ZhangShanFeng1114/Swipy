@@ -226,7 +226,6 @@ public struct Swipy<C, A>: View where C: View, A: View {
                         )
                 }
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
 
             GeometryReader { geometry in
                 HStack(spacing: 0) {
@@ -243,7 +242,6 @@ public struct Swipy<C, A>: View where C: View, A: View {
                             .onChange(of: geometry.size.width) { newValue in model.swipeActionsWidth = newValue }
                     }
                 )
-                .frame(height: (model.contentSize ?? geometry.size).height)
                 .offset(x: (model.contentSize ?? geometry.size).width)
             }
         }
