@@ -33,6 +33,34 @@ public enum SwipyRepeatedSwipeBehavior: Sendable {
     case collapseAndSuppressUntilEnd
 }
 
+public enum SwipyActionHeight: Sendable {
+    case large
+    case small
+}
+
+private enum SwipyActionMetrics {
+    static let smallHeight: CGFloat = 45
+    static let smallCornerRadius: CGFloat = 24
+}
+
+private struct SwipyActionStyle {
+    let height: CGFloat?
+    let cornerRadius: CGFloat?
+
+    static let none = SwipyActionStyle(height: nil, cornerRadius: nil)
+}
+
+private struct SwipyActionStyleKey: EnvironmentKey {
+    static let defaultValue = SwipyActionStyle.none
+}
+
+private extension EnvironmentValues {
+    var swipyActionStyle: SwipyActionStyle {
+        get { self[SwipyActionStyleKey.self] }
+        set { self[SwipyActionStyleKey.self] = newValue }
+    }
+}
+
 public struct SwipyDirectionLock: Sendable {
     public let minimumDistance: Double
     public let horizontalDominance: Double
@@ -196,6 +224,7 @@ public struct SwipyDefaults {
     public static let scrollBehavior: SwipyScrollBehavior = .normal
     public static let repeatedSwipeBehavior: SwipyRepeatedSwipeBehavior = .collapseAndSuppressUntilEnd
     public static let directionLock: SwipyDirectionLock = .init()
+    public static let actionHeight: SwipyActionHeight = .large
     public static let swipeActions: @Sendable () -> EmptyView = { EmptyView() }
 }
 
@@ -291,6 +320,7 @@ public struct Swipy<C, A>: View where C: View, A: View {
     public let content: (SwipyModel) -> C
     public let leadingActions: () -> AnyView
     public let actions: () -> A
+    public let actionHeight: SwipyActionHeight
 
     @Binding public var isSwipingAnItem: Bool
 
@@ -306,19 +336,18 @@ public struct Swipy<C, A>: View where C: View, A: View {
     public var body: some View {
         let currentOffsetWidth = model.isSwiping ? interactiveOffsetWidth : model.swipeOffset.width
 
-        ZStack(alignment: .topLeading) {
-            actionsLayer(offsetWidth: currentOffsetWidth)
-
-            content(model)
-                .disabled(model.isSwiping || model.isSwiped)
-                .buttonStyle(SwipyTouchableDisabledStyle())
-                .background(
-                    SwipySizeReader { size in
-                        model.contentSize = size
-                    }
-                )
-                .offset(x: currentOffsetWidth)
-        }
+        content(model)
+            .disabled(model.isSwiping || model.isSwiped)
+            .buttonStyle(SwipyTouchableDisabledStyle())
+            .background(
+                SwipySizeReader { size in
+                    model.contentSize = size
+                }
+            )
+            .offset(x: currentOffsetWidth)
+            .background(alignment: .topLeading) {
+                actionsLayer(offsetWidth: currentOffsetWidth)
+            }
         .environmentObject(model)
         .onChange(of: model.isSwiping) { newValue in
             isSwipingAnItem = newValue
@@ -351,11 +380,14 @@ public struct Swipy<C, A>: View where C: View, A: View {
     @ViewBuilder
     private func actionsLayer(offsetWidth: Double) -> some View {
         let contentSize = model.contentSize ?? .zero
-        let actionHeight = contentSize.height
+        let layerHeight = contentSize.height
+        let actionStyle = resolvedActionStyle(contentHeight: layerHeight)
+        let actionHeight = actionStyle.height ?? layerHeight
 
         ZStack(alignment: .topLeading) {
             HStack(spacing: 0) {
                 leadingActions()
+                    .environment(\.swipyActionStyle, actionStyle)
                     .frame(height: actionHeight)
                     .background(
                         SwipySizeReader { size in
@@ -364,12 +396,13 @@ public struct Swipy<C, A>: View where C: View, A: View {
                     )
                 Spacer(minLength: model.swipeActionsMargin.leading)
             }
-            .frame(width: contentSize.width, height: actionHeight, alignment: .leading)
+            .frame(width: contentSize.width, height: layerHeight, alignment: .leading)
             .opacity(actionOpacity(for: .leading, offsetWidth: offsetWidth))
 
             HStack(spacing: 0) {
                 Spacer(minLength: model.swipeActionsMargin.trailing)
                 actions()
+                    .environment(\.swipyActionStyle, actionStyle)
                     .frame(height: actionHeight)
                     .background(
                         SwipySizeReader { size in
@@ -378,10 +411,22 @@ public struct Swipy<C, A>: View where C: View, A: View {
                         }
                     )
             }
-            .frame(width: contentSize.width, height: actionHeight, alignment: .trailing)
+            .frame(width: contentSize.width, height: layerHeight, alignment: .trailing)
             .opacity(actionOpacity(for: .trailing, offsetWidth: offsetWidth))
         }
-        .frame(width: contentSize.width, height: actionHeight, alignment: .topLeading)
+        .frame(width: contentSize.width, height: layerHeight, alignment: .topLeading)
+    }
+
+    private func resolvedActionStyle(contentHeight: CGFloat) -> SwipyActionStyle {
+        switch actionHeight {
+        case .large:
+            return .none
+        case .small:
+            return SwipyActionStyle(
+                height: min(SwipyActionMetrics.smallHeight, contentHeight),
+                cornerRadius: SwipyActionMetrics.smallCornerRadius
+            )
+        }
     }
 
     private func actionOpacity(for edge: SwipySwipeEdge, offsetWidth: Double) -> Double {
@@ -621,11 +666,13 @@ public struct Swipy<C, A>: View where C: View, A: View {
                 scrollBehavior: SwipyScrollBehavior = SwipyDefaults.scrollBehavior,
                 repeatedSwipeBehavior: SwipyRepeatedSwipeBehavior = SwipyDefaults.repeatedSwipeBehavior,
                 directionLock: SwipyDirectionLock = SwipyDefaults.directionLock,
+                actionHeight: SwipyActionHeight = SwipyDefaults.actionHeight,
                 @ViewBuilder content: @escaping (SwipyModel) -> C,
                 @ViewBuilder actions: @escaping () -> A = SwipyDefaults.swipeActions) {
         self.content = content
         self.leadingActions = { AnyView(EmptyView()) }
         self.actions = actions
+        self.actionHeight = actionHeight
         _isSwipingAnItem = isSwipingAnItem
 
         let model = SwipyModel()
@@ -649,12 +696,14 @@ public struct Swipy<C, A>: View where C: View, A: View {
                     scrollBehavior: SwipyScrollBehavior = SwipyDefaults.scrollBehavior,
                     repeatedSwipeBehavior: SwipyRepeatedSwipeBehavior = SwipyDefaults.repeatedSwipeBehavior,
                     directionLock: SwipyDirectionLock = SwipyDefaults.directionLock,
+                    actionHeight: SwipyActionHeight = SwipyDefaults.actionHeight,
                     @ViewBuilder content: @escaping (SwipyModel) -> C,
                     @ViewBuilder leadingActions: @escaping () -> LA,
                     @ViewBuilder actions: @escaping () -> A) where LA: View {
         self.content = content
         self.leadingActions = { AnyView(leadingActions()) }
         self.actions = actions
+        self.actionHeight = actionHeight
         _isSwipingAnItem = isSwipingAnItem
 
         let model = SwipyModel()
@@ -693,6 +742,7 @@ private struct SwipySizeReader: View {
 
 public struct SwipyAction<C>: View where C: View {
     @EnvironmentObject public var model: SwipyModel
+    @Environment(\.swipyActionStyle) private var actionStyle
     
     public let content: (SwipyModel) -> C
 
@@ -700,10 +750,25 @@ public struct SwipyAction<C>: View where C: View {
         VStack {
             content(model)
         }
+        .modifier(SwipyActionStyleModifier(style: actionStyle))
     }
 
     public init(@ViewBuilder content: @escaping (SwipyModel) -> C) {
         self.content = content
+    }
+}
+
+private struct SwipyActionStyleModifier: ViewModifier {
+    let style: SwipyActionStyle
+
+    func body(content: Content) -> some View {
+        let styled = content.frame(height: style.height)
+
+        if let cornerRadius = style.cornerRadius {
+            styled.clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+        } else {
+            styled
+        }
     }
 }
 
