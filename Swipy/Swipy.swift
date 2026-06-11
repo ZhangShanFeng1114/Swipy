@@ -260,6 +260,8 @@ public class SwipyModel: ObservableObject {
     public func unswipe() {
         swipedEdge = nil
         isSwiped = false
+        isSwiping = false
+        isScrolling = false
         swipeOffset = .zero
     }
 
