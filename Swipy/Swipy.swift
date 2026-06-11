@@ -59,6 +59,55 @@ private extension EnvironmentValues {
         get { self[SwipyActionStyleKey.self] }
         set { self[SwipyActionStyleKey.self] = newValue }
     }
+
+    var swipyScrollLockState: SwipyScrollLockState? {
+        get { self[SwipyScrollLockStateKey.self] }
+        set { self[SwipyScrollLockStateKey.self] = newValue }
+    }
+}
+
+@MainActor
+private final class SwipyScrollLockState: ObservableObject {
+    @Published private(set) var isLocked = false
+
+    private var lockIDs: Set<UUID> = []
+
+    func setLocked(_ locked: Bool, for id: UUID) {
+        if locked {
+            lockIDs.insert(id)
+        } else {
+            lockIDs.remove(id)
+        }
+
+        isLocked = !lockIDs.isEmpty
+    }
+}
+
+private struct SwipyScrollLockStateKey: EnvironmentKey {
+    static let defaultValue: SwipyScrollLockState? = nil
+}
+
+private struct SwipyScrollLockModifier: ViewModifier {
+    @StateObject private var scrollLockState = SwipyScrollLockState()
+
+    let additionalLock: Bool
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        let lockedContent = content.environment(\.swipyScrollLockState, scrollLockState)
+
+        if #available(iOS 16.0, *) {
+            lockedContent.scrollDisabled(additionalLock || scrollLockState.isLocked)
+        } else {
+            lockedContent
+        }
+    }
+}
+
+public extension View {
+    func swipyScrollLock(_ additionalLock: Bool = false) -> some View {
+        modifier(SwipyScrollLockModifier(additionalLock: additionalLock))
+    }
 }
 
 public struct SwipyDirectionLock: Sendable {
@@ -325,6 +374,7 @@ public struct Swipy<C, A>: View where C: View, A: View {
     public let actionHeight: SwipyActionHeight
 
     @Binding public var isSwipingAnItem: Bool
+    @Environment(\.swipyScrollLockState) private var scrollLockState
 
     @StateObject public var model: SwipyModel
 
@@ -334,6 +384,7 @@ public struct Swipy<C, A>: View where C: View, A: View {
     @State private var gestureAxis: SwipyGestureAxis?
     @State private var activeSwipeEdge: SwipySwipeEdge?
     @State private var isCurrentGestureSuppressed = false
+    @State private var scrollLockID = UUID()
 
     public var body: some View {
         let currentOffsetWidth = model.isSwiping ? interactiveOffsetWidth : model.swipeOffset.width
@@ -353,6 +404,7 @@ public struct Swipy<C, A>: View where C: View, A: View {
         .environmentObject(model)
         .onChange(of: model.isSwiping) { newValue in
             isSwipingAnItem = newValue
+            scrollLockState?.setLocked(newValue, for: scrollLockID)
         }
         .onChange(of: model.leadingSwipeActionsWidth) { _ in
             syncSwipedOffsetIfNeeded()
@@ -376,6 +428,10 @@ public struct Swipy<C, A>: View where C: View, A: View {
                         .onEnded(onDragEnded)
                 )
             }
+        }
+        .onDisappear {
+            isSwipingAnItem = false
+            scrollLockState?.setLocked(false, for: scrollLockID)
         }
     }
 
@@ -659,7 +715,7 @@ public struct Swipy<C, A>: View where C: View, A: View {
         isCurrentGestureSuppressed = false
     }
 
-    public init(isSwipingAnItem: Binding<Bool>,
+    public init(isSwipingAnItem: Binding<Bool> = .constant(false),
                 swipeActionsMargin: SwipyHorizontalMargin = SwipyDefaults.swipeActionsMargin,
                 swipeThreshold: @escaping @MainActor @Sendable (SwipyModel) -> Double = SwipyDefaults.swipeThreshold,
                 leadingSwipeThreshold: @escaping @MainActor @Sendable (SwipyModel) -> Double = SwipyDefaults.leadingSwipeThreshold,
@@ -689,7 +745,7 @@ public struct Swipy<C, A>: View where C: View, A: View {
         _model = StateObject(wrappedValue: model)
     }
 
-    public init<LA>(isSwipingAnItem: Binding<Bool>,
+    public init<LA>(isSwipingAnItem: Binding<Bool> = .constant(false),
                     swipeActionsMargin: SwipyHorizontalMargin = SwipyDefaults.swipeActionsMargin,
                     swipeThreshold: @escaping @MainActor @Sendable (SwipyModel) -> Double = SwipyDefaults.swipeThreshold,
                     leadingSwipeThreshold: @escaping @MainActor @Sendable (SwipyModel) -> Double = SwipyDefaults.leadingSwipeThreshold,
