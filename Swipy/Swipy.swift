@@ -23,6 +23,32 @@ public struct SwipyHorizontalMargin: Sendable {
     }
 }
 
+public enum SwipySwipeEdge: Sendable {
+    case leading
+    case trailing
+}
+
+public enum SwipyRepeatedSwipeBehavior: Sendable {
+    case none
+    case collapseAndSuppressUntilEnd
+}
+
+public struct SwipyDirectionLock: Sendable {
+    public let minimumDistance: Double
+    public let horizontalDominance: Double
+    public let verticalDominance: Double
+
+    public init(
+        minimumDistance: Double = 8,
+        horizontalDominance: Double = 1.15,
+        verticalDominance: Double = 1.05
+    ) {
+        self.minimumDistance = minimumDistance
+        self.horizontalDominance = horizontalDominance
+        self.verticalDominance = verticalDominance
+    }
+}
+
 public struct SwipySwipeBehavior: Sendable {
     public typealias Decider = @MainActor @Sendable (SwipyModel, CGSize, CGSize) -> Bool
 
@@ -160,8 +186,16 @@ public struct SwipyScrollBehavior: Sendable {
 public struct SwipyDefaults {
     public static let swipeActionsMargin: SwipyHorizontalMargin = SwipyHorizontalMargin(leading: 0, trailing: 0)
     public static let swipeThreshold: @MainActor @Sendable (SwipyModel) -> Double = { $0.swipeActionsWidth }
+    public static let leadingSwipeThreshold: @MainActor @Sendable (SwipyModel) -> Double = { $0.leadingSwipeActionsWidth }
+    public static let swipeCloseThreshold: @MainActor @Sendable (SwipyModel, SwipySwipeEdge) -> Double = { model, edge in
+        let actionWidth = model.swipeActionsWidth(for: edge)
+        let closeRetainThreshold = max(112, actionWidth * 0.90)
+        return min(closeRetainThreshold, max(actionWidth - 12, 0))
+    }
     public static let swipeBehavior: SwipySwipeBehavior = .normal
     public static let scrollBehavior: SwipyScrollBehavior = .normal
+    public static let repeatedSwipeBehavior: SwipyRepeatedSwipeBehavior = .collapseAndSuppressUntilEnd
+    public static let directionLock: SwipyDirectionLock = .init()
     public static let swipeActions: @Sendable () -> EmptyView = { EmptyView() }
 }
 
@@ -171,24 +205,79 @@ public class SwipyModel: ObservableObject {
     @Published public var isSwiping: Bool = false
     @Published public var isScrolling: Bool = false
     @Published public var isSwiped: Bool = false
+    @Published public var swipedEdge: SwipySwipeEdge?
     @Published public var swipeActionsWidth: Double = 0.0
+    @Published public var leadingSwipeActionsWidth: Double = 0.0
+    @Published public var trailingSwipeActionsWidth: Double = 0.0
     @Published public var contentSize: CGSize?
 
     @Published public var swipeActionsMargin = SwipyDefaults.swipeActionsMargin
     @Published public var swipeThreshold: @MainActor @Sendable (SwipyModel) -> Double = SwipyDefaults.swipeThreshold
+    @Published public var leadingSwipeThreshold: @MainActor @Sendable (SwipyModel) -> Double = SwipyDefaults.leadingSwipeThreshold
+    @Published public var swipeCloseThreshold: @MainActor @Sendable (SwipyModel, SwipySwipeEdge) -> Double = SwipyDefaults.swipeCloseThreshold
     @Published public var swipeBehavior: SwipySwipeBehavior = SwipyDefaults.swipeBehavior
     @Published public var scrollBehavior: SwipyScrollBehavior = SwipyDefaults.scrollBehavior
+    @Published public var repeatedSwipeBehavior: SwipyRepeatedSwipeBehavior = SwipyDefaults.repeatedSwipeBehavior
+    @Published public var directionLock: SwipyDirectionLock = SwipyDefaults.directionLock
 
     public init() {}
     
-    public func swipe() {
-        swipeOffset.width = -swipeThreshold(self)
+    public func swipe(_ edge: SwipySwipeEdge = .trailing) {
+        swipedEdge = edge
         isSwiped = true
+        swipeOffset.width = swipedOffset(for: edge)
     }
     
     public func unswipe() {
+        swipedEdge = nil
         isSwiped = false
         swipeOffset = .zero
+    }
+
+    public func swipeActionsWidth(for edge: SwipySwipeEdge) -> Double {
+        switch edge {
+        case .leading:
+            leadingSwipeActionsWidth
+        case .trailing:
+            trailingSwipeActionsWidth
+        }
+    }
+
+    public func revealWidth(for edge: SwipySwipeEdge) -> Double {
+        let actionsWidth = swipeActionsWidth(for: edge)
+
+        guard actionsWidth > 0 else {
+            return 0
+        }
+
+        switch edge {
+        case .leading:
+            return actionsWidth + swipeActionsMargin.leading
+        case .trailing:
+            return actionsWidth + swipeActionsMargin.trailing
+        }
+    }
+
+    public func swipeThreshold(for edge: SwipySwipeEdge) -> Double {
+        switch edge {
+        case .leading:
+            return leadingSwipeThreshold(self)
+        case .trailing:
+            return swipeThreshold(self)
+        }
+    }
+
+    public func closeThreshold(for edge: SwipySwipeEdge) -> Double {
+        swipeCloseThreshold(self, edge)
+    }
+
+    public func swipedOffset(for edge: SwipySwipeEdge) -> Double {
+        switch edge {
+        case .leading:
+            return revealWidth(for: .leading)
+        case .trailing:
+            return -revealWidth(for: .trailing)
+        }
     }
 }
 
@@ -200,71 +289,51 @@ public struct SwipyTouchableDisabledStyle: ButtonStyle {
 
 public struct Swipy<C, A>: View where C: View, A: View {
     public let content: (SwipyModel) -> C
+    public let leadingActions: () -> AnyView
     public let actions: () -> A
 
     @Binding public var isSwipingAnItem: Bool
 
     @StateObject public var model: SwipyModel
 
+    // Keep per-frame drag movement local so complex rows do not observe every offset tick.
+    @State private var interactiveOffsetWidth: Double = 0.0
+    @State private var gestureStartOffsetWidth: Double = 0.0
+    @State private var gestureAxis: SwipyGestureAxis?
+    @State private var activeSwipeEdge: SwipySwipeEdge?
+    @State private var isCurrentGestureSuppressed = false
+
     public var body: some View {
-        let swipeActionsModeOffset = model.swipeActionsWidth + model.swipeActionsMargin.trailing
-        let threshold = model.swipeThreshold(model)
-        let swipeActionOpacity = min(threshold, abs(model.swipeOffset.width)) / threshold
+        let currentOffsetWidth = model.isSwiping ? interactiveOffsetWidth : model.swipeOffset.width
 
-        ZStack {
-            ZStack {
-                HStack(spacing: 0) {
-                    content(model)
-                        .disabled(model.isSwiping || model.isSwiped)
-                        .buttonStyle(SwipyTouchableDisabledStyle())
-                        .background(
-                            GeometryReader { geometry in
-                                Color.clear
-                                    .onAppear { model.contentSize = geometry.size }
-                                    .onChange(of: geometry.size.width) { newValue in model.contentSize?.width = newValue }
-                            }
-                        )
-                }
-            }
+        ZStack(alignment: .topLeading) {
+            actionsLayer(offsetWidth: currentOffsetWidth)
 
-            GeometryReader { geometry in
-                HStack(spacing: 0) {
-                    Spacer(minLength: model.swipeActionsMargin.leading)
-                    actions()
-                        .frame(idealHeight: geometry.size.height)
-                }
-                .scaledToFit()
-                .opacity(swipeActionOpacity)
+            content(model)
+                .disabled(model.isSwiping || model.isSwiped)
+                .buttonStyle(SwipyTouchableDisabledStyle())
                 .background(
-                    GeometryReader { geometry in
-                        Color.clear
-                            .onAppear { model.swipeActionsWidth = geometry.size.width }
-                            .onChange(of: geometry.size.width) { newValue in model.swipeActionsWidth = newValue }
+                    SwipySizeReader { size in
+                        model.contentSize = size
                     }
                 )
-                .offset(x: (model.contentSize ?? geometry.size).width)
-            }
+                .offset(x: currentOffsetWidth)
         }
         .environmentObject(model)
-        .offset(x: !model.isSwiping && model.isSwiped ? -swipeActionsModeOffset : model.swipeOffset.width)
         .onChange(of: model.isSwiping) { newValue in
             isSwipingAnItem = newValue
-
-            if !newValue && model.isSwiped {
-                withAnimation(.bouncy) {
-                    model.swipeOffset.width = -threshold
-                }
-            } else if newValue {
-                model.isSwiped = false
-                withAnimation(.bouncy) {
-                    model.swipeOffset = .zero
-                }
-            }
+        }
+        .onChange(of: model.leadingSwipeActionsWidth) { _ in
+            syncSwipedOffsetIfNeeded()
+        }
+        .onChange(of: model.trailingSwipeActionsWidth) { _ in
+            syncSwipedOffsetIfNeeded()
         }
         .modifier {
             if #available(iOS 18, *) {
                 $0.gesture(
                     SimultaneousSwipeGesture(
+                        onBegan: onSwipeBegan,
                         onChanged: onSwipeChanged,
                         onEnded: onSwipeEnded
                     )
@@ -278,115 +347,347 @@ public struct Swipy<C, A>: View where C: View, A: View {
             }
         }
     }
-    
+
+    @ViewBuilder
+    private func actionsLayer(offsetWidth: Double) -> some View {
+        let contentSize = model.contentSize ?? .zero
+        let actionHeight = contentSize.height
+
+        ZStack(alignment: .topLeading) {
+            HStack(spacing: 0) {
+                leadingActions()
+                    .frame(height: actionHeight)
+                    .background(
+                        SwipySizeReader { size in
+                            model.leadingSwipeActionsWidth = size.width
+                        }
+                    )
+                Spacer(minLength: model.swipeActionsMargin.leading)
+            }
+            .frame(width: contentSize.width, height: actionHeight, alignment: .leading)
+            .opacity(actionOpacity(for: .leading, offsetWidth: offsetWidth))
+
+            HStack(spacing: 0) {
+                Spacer(minLength: model.swipeActionsMargin.trailing)
+                actions()
+                    .frame(height: actionHeight)
+                    .background(
+                        SwipySizeReader { size in
+                            model.trailingSwipeActionsWidth = size.width
+                            model.swipeActionsWidth = size.width
+                        }
+                    )
+            }
+            .frame(width: contentSize.width, height: actionHeight, alignment: .trailing)
+            .opacity(actionOpacity(for: .trailing, offsetWidth: offsetWidth))
+        }
+        .frame(width: contentSize.width, height: actionHeight, alignment: .topLeading)
+    }
+
+    private func actionOpacity(for edge: SwipySwipeEdge, offsetWidth: Double) -> Double {
+        let revealWidth = max(model.revealWidth(for: edge), 1)
+
+        switch edge {
+        case .leading:
+            return min(1, max(0, offsetWidth) / revealWidth)
+        case .trailing:
+            return min(1, max(0, -offsetWidth) / revealWidth)
+        }
+    }
+
+    private func onSwipeBegan(_ recognizer: UILongPressGestureRecognizer) {
+        resetGestureTracking()
+    }
+
     private func onSwipeChanged(_ recognizer: UILongPressGestureRecognizer, _ translation: CGSize, _ velocity: CGSize) {
-        if model.isScrolling { return }
-        
-        let threshold = model.swipeThreshold(model)
-
-        if model.scrollBehavior.decider(model, translation, velocity) {
-            model.isScrolling = true
-            return
-        }
-
-        if !model.swipeBehavior.decider(model, translation, velocity) {
-            return
-        }
-
-        if model.swipeOffset.width > -threshold {
-            withAnimation(.bouncy) {
-                model.isSwiped = false
-            }
-        }
-
-        model.isSwiping = true
-
-        withAnimation(.bouncy) {
-            model.swipeOffset.width = translation.width
-        }
+        handleGestureChanged(translation: translation, velocity: velocity)
     }
-    
+
     private func onSwipeEnded(_ recognizer: UILongPressGestureRecognizer, _ translation: CGSize, _ velocity: CGSize) {
-        let threshold = model.swipeThreshold(model)
-        
-        model.isSwiping = false
-        model.isScrolling = false
-
-        if model.swipeOffset.width < -threshold {
-            withAnimation(.bouncy) {
-                model.isSwiped = true
-            }
-        } else {
-            withAnimation(.bouncy) {
-                model.swipeOffset = .zero
-            }
-        }
+        handleGestureEnded(translation: translation, velocity: velocity)
     }
 
-    
     private func onDragChanged(_ value: DragGesture.Value) {
-        if model.isScrolling { return }
-        
-        let threshold = model.swipeThreshold(model)
-        let translation = value.translation
         let velocity = CGSize(width: value.velocity.width, height: value.velocity.height)
+        handleGestureChanged(translation: value.translation, velocity: velocity)
+    }
 
-        if model.scrollBehavior.decider(model, translation, velocity) {
-            model.isScrolling = true
+    private func onDragEnded(_ gesture: DragGesture.Value) {
+        let velocity = CGSize(width: gesture.velocity.width, height: gesture.velocity.height)
+        handleGestureEnded(translation: gesture.translation, velocity: velocity)
+    }
+
+    private func handleGestureChanged(translation: CGSize, velocity: CGSize) {
+        if model.isScrolling || isCurrentGestureSuppressed { return }
+
+        guard lockGestureAxisIfNeeded(translation: translation, velocity: velocity) else {
             return
         }
 
-        if !model.swipeBehavior.decider(model, translation, velocity) {
+        guard gestureAxis == .horizontal else {
             return
         }
 
-        if model.swipeOffset.width > -threshold {
-            withAnimation(.bouncy) {
-                model.isSwiped = false
-            }
+        let edge = translation.width >= 0 ? SwipySwipeEdge.leading : .trailing
+
+        if shouldCollapseAndSuppressRepeatedSwipe(edge: edge) {
+            collapseAndSuppressCurrentGesture()
+            return
         }
 
-        model.isSwiping = true
+        if !canSwipe(edge) && !model.isSwiped {
+            return
+        }
+
+        if activeSwipeEdge == nil {
+            activeSwipeEdge = edge
+        }
+
+        guard canStartSwipe(edge: edge, translation: translation, velocity: velocity) else {
+            return
+        }
+
+        if !model.isSwiping {
+            model.isSwiping = true
+        }
+
+        interactiveOffsetWidth = clampedOffset(gestureStartOffsetWidth + translation.width)
+    }
+
+    private func handleGestureEnded(translation: CGSize, velocity: CGSize) {
+        guard !isCurrentGestureSuppressed else {
+            model.isSwiping = false
+            model.isScrolling = false
+            resetGestureTracking()
+            return
+        }
+
+        guard gestureAxis == .horizontal else {
+            model.isSwiping = false
+            model.isScrolling = false
+            resetGestureTracking()
+            return
+        }
+
+        let targetEdge = targetSwipeEdge(offsetWidth: interactiveOffsetWidth)
 
         withAnimation(.bouncy) {
-            model.swipeOffset.width = value.translation.width
+            if let targetEdge {
+                model.swipe(targetEdge)
+            } else {
+                model.unswipe()
+            }
+
+            interactiveOffsetWidth = model.swipeOffset.width
+            model.isSwiping = false
+        }
+
+        model.isScrolling = false
+        resetGestureTracking(keepingInteractiveOffset: true)
+    }
+
+    private func lockGestureAxisIfNeeded(translation: CGSize, velocity: CGSize) -> Bool {
+        if gestureAxis != nil {
+            return true
+        }
+
+        let lock = model.directionLock
+        let absX = abs(translation.width)
+        let absY = abs(translation.height)
+
+        if absX < lock.minimumDistance && absY < lock.minimumDistance {
+            return false
+        }
+
+        if absX >= lock.minimumDistance && absX > absY * lock.horizontalDominance {
+            gestureAxis = .horizontal
+            gestureStartOffsetWidth = model.swipeOffset.width
+            interactiveOffsetWidth = gestureStartOffsetWidth
+            return true
+        }
+
+        if model.scrollBehavior.decider(model, translation, velocity)
+            || (absY >= lock.minimumDistance && absY > absX * lock.verticalDominance) {
+            gestureAxis = .vertical
+            model.isScrolling = true
+
+            if model.isSwiped {
+                withAnimation(.bouncy) {
+                    model.unswipe()
+                }
+            }
+
+            return false
+        }
+
+        return false
+    }
+
+    private func canStartSwipe(edge: SwipySwipeEdge, translation: CGSize, velocity: CGSize) -> Bool {
+        if model.isSwiped {
+            return true
+        }
+
+        let swipeTranslation = normalizedGestureValue(translation, for: edge)
+        let swipeVelocity = normalizedGestureValue(velocity, for: edge)
+        return model.swipeBehavior.decider(model, swipeTranslation, swipeVelocity)
+    }
+
+    private func normalizedGestureValue(_ value: CGSize, for edge: SwipySwipeEdge) -> CGSize {
+        switch edge {
+        case .leading:
+            return CGSize(width: -value.width, height: value.height)
+        case .trailing:
+            return value
         }
     }
-    
-    private func onDragEnded(_ gesture: DragGesture.Value) {
-        let threshold = model.swipeThreshold(model)
-        
-        model.isSwiping = false
-        model.isScrolling = false
 
-        if model.swipeOffset.width < -threshold {
-            withAnimation(.bouncy) {
-                model.isSwiped = true
-            }
-        } else {
-            withAnimation(.bouncy) {
-                model.swipeOffset = .zero
-            }
+    private func canSwipe(_ edge: SwipySwipeEdge) -> Bool {
+        model.revealWidth(for: edge) > 0
+    }
+
+    private func shouldCollapseAndSuppressRepeatedSwipe(edge: SwipySwipeEdge) -> Bool {
+        model.repeatedSwipeBehavior == .collapseAndSuppressUntilEnd
+            && model.swipedEdge == edge
+            && model.isSwiped
+    }
+
+    private func collapseAndSuppressCurrentGesture() {
+        isCurrentGestureSuppressed = true
+
+        withAnimation(.bouncy) {
+            model.unswipe()
+            interactiveOffsetWidth = .zero
+            model.isSwiping = false
         }
+    }
+
+    private func clampedOffset(_ offsetWidth: Double) -> Double {
+        let leadingRevealWidth = model.revealWidth(for: .leading)
+        let trailingRevealWidth = model.revealWidth(for: .trailing)
+
+        return min(max(offsetWidth, -trailingRevealWidth), leadingRevealWidth)
+    }
+
+    private func targetSwipeEdge(offsetWidth: Double) -> SwipySwipeEdge? {
+        if offsetWidth > 0,
+           canSwipe(.leading),
+           offsetWidth >= targetThreshold(for: .leading) {
+            return .leading
+        }
+
+        if offsetWidth < 0,
+           canSwipe(.trailing),
+           abs(offsetWidth) >= targetThreshold(for: .trailing) {
+            return .trailing
+        }
+
+        return nil
+    }
+
+    private func targetThreshold(for edge: SwipySwipeEdge) -> Double {
+        if model.isSwiped, model.swipedEdge == edge {
+            return model.closeThreshold(for: edge)
+        }
+
+        return model.swipeThreshold(for: edge)
+    }
+
+    private func syncSwipedOffsetIfNeeded() {
+        guard let swipedEdge = model.swipedEdge, !model.isSwiping else {
+            return
+        }
+
+        model.swipeOffset.width = model.swipedOffset(for: swipedEdge)
+    }
+
+    private func resetGestureTracking(keepingInteractiveOffset: Bool = false) {
+        if !keepingInteractiveOffset {
+            interactiveOffsetWidth = model.swipeOffset.width
+        }
+
+        gestureStartOffsetWidth = model.swipeOffset.width
+        gestureAxis = nil
+        activeSwipeEdge = nil
+        isCurrentGestureSuppressed = false
     }
 
     public init(isSwipingAnItem: Binding<Bool>,
                 swipeActionsMargin: SwipyHorizontalMargin = SwipyDefaults.swipeActionsMargin,
                 swipeThreshold: @escaping @MainActor @Sendable (SwipyModel) -> Double = SwipyDefaults.swipeThreshold,
+                leadingSwipeThreshold: @escaping @MainActor @Sendable (SwipyModel) -> Double = SwipyDefaults.leadingSwipeThreshold,
+                swipeCloseThreshold: @escaping @MainActor @Sendable (SwipyModel, SwipySwipeEdge) -> Double = SwipyDefaults.swipeCloseThreshold,
                 swipeBehavior: SwipySwipeBehavior = SwipyDefaults.swipeBehavior,
                 scrollBehavior: SwipyScrollBehavior = SwipyDefaults.scrollBehavior,
+                repeatedSwipeBehavior: SwipyRepeatedSwipeBehavior = SwipyDefaults.repeatedSwipeBehavior,
+                directionLock: SwipyDirectionLock = SwipyDefaults.directionLock,
                 @ViewBuilder content: @escaping (SwipyModel) -> C,
                 @ViewBuilder actions: @escaping () -> A = SwipyDefaults.swipeActions) {
         self.content = content
+        self.leadingActions = { AnyView(EmptyView()) }
         self.actions = actions
         _isSwipingAnItem = isSwipingAnItem
 
         let model = SwipyModel()
         model.swipeActionsMargin = swipeActionsMargin
         model.swipeThreshold = swipeThreshold
+        model.leadingSwipeThreshold = leadingSwipeThreshold
+        model.swipeCloseThreshold = swipeCloseThreshold
         model.swipeBehavior = swipeBehavior
         model.scrollBehavior = scrollBehavior
+        model.repeatedSwipeBehavior = repeatedSwipeBehavior
+        model.directionLock = directionLock
         _model = StateObject(wrappedValue: model)
+    }
+
+    public init<LA>(isSwipingAnItem: Binding<Bool>,
+                    swipeActionsMargin: SwipyHorizontalMargin = SwipyDefaults.swipeActionsMargin,
+                    swipeThreshold: @escaping @MainActor @Sendable (SwipyModel) -> Double = SwipyDefaults.swipeThreshold,
+                    leadingSwipeThreshold: @escaping @MainActor @Sendable (SwipyModel) -> Double = SwipyDefaults.leadingSwipeThreshold,
+                    swipeCloseThreshold: @escaping @MainActor @Sendable (SwipyModel, SwipySwipeEdge) -> Double = SwipyDefaults.swipeCloseThreshold,
+                    swipeBehavior: SwipySwipeBehavior = SwipyDefaults.swipeBehavior,
+                    scrollBehavior: SwipyScrollBehavior = SwipyDefaults.scrollBehavior,
+                    repeatedSwipeBehavior: SwipyRepeatedSwipeBehavior = SwipyDefaults.repeatedSwipeBehavior,
+                    directionLock: SwipyDirectionLock = SwipyDefaults.directionLock,
+                    @ViewBuilder content: @escaping (SwipyModel) -> C,
+                    @ViewBuilder leadingActions: @escaping () -> LA,
+                    @ViewBuilder actions: @escaping () -> A) where LA: View {
+        self.content = content
+        self.leadingActions = { AnyView(leadingActions()) }
+        self.actions = actions
+        _isSwipingAnItem = isSwipingAnItem
+
+        let model = SwipyModel()
+        model.swipeActionsMargin = swipeActionsMargin
+        model.swipeThreshold = swipeThreshold
+        model.leadingSwipeThreshold = leadingSwipeThreshold
+        model.swipeCloseThreshold = swipeCloseThreshold
+        model.swipeBehavior = swipeBehavior
+        model.scrollBehavior = scrollBehavior
+        model.repeatedSwipeBehavior = repeatedSwipeBehavior
+        model.directionLock = directionLock
+        _model = StateObject(wrappedValue: model)
+    }
+}
+
+private enum SwipyGestureAxis {
+    case horizontal
+    case vertical
+}
+
+private struct SwipySizeReader: View {
+    let onChange: @MainActor (CGSize) -> Void
+
+    var body: some View {
+        GeometryReader { geometry in
+            Color.clear
+                .onAppear {
+                    onChange(geometry.size)
+                }
+                .onChange(of: geometry.size) { newValue in
+                    onChange(newValue)
+                }
+        }
     }
 }
 
@@ -565,6 +866,36 @@ struct Preview: View {
                                     .foregroundColor(.black)
                             }
                             .padding(.horizontal)
+                        } leadingActions: {
+                            SwipyAction { model in
+                                Button {
+                                    withAnimation(.bouncy) {
+                                        if let index = items.firstIndex(of: item) {
+                                            let pinnedItem = items.remove(at: index)
+                                            items.insert(pinnedItem, at: 0)
+                                        }
+
+                                        model.unswipe()
+                                    }
+                                } label: {
+                                    Image(systemName: "pin.fill")
+                                        .font(.system(size: 20))
+                                }
+                                .frame(maxHeight: .infinity)
+                                .padding(.horizontal)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 16)
+                                        .fill(
+                                            .linearGradient(
+                                                colors: [.orange.opacity(0.8), .yellow.opacity(0.8)],
+                                                startPoint: .top,
+                                                endPoint: .bottom
+                                            )
+                                        )
+                                        .shadow(color: .black.opacity(0.1), radius: 5, x: 0, y: 2)
+                                )
+                                .foregroundColor(.white)
+                            }
                         } actions: {
                             HStack {
                                 SwipyAction { model in

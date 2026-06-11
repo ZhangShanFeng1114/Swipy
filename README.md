@@ -94,11 +94,39 @@ Swipy(isSwipingAnItem: $isSwipingAnItem) { model in
 
 ### Adding Actions
 
-You can add actions to a swipeable view by providing a closure that returns a view for each action.
+You can add trailing actions to a swipeable view by providing a closure that returns a view for each action.
 
 ```swift
 Swipy(isSwipingAnItem: $isSwipingAnItem) { model in
     Text("Swipe me!")
+} actions: {
+    SwipyAction { model in
+        Button {
+            print("Delete")
+            model.unswipe()
+        } label: {
+            Image(systemName: "trash")
+                .foregroundStyle(.white)
+        }
+    }
+}
+```
+
+You can also add leading actions. Leading actions are revealed by swiping right, and trailing actions are revealed by swiping left.
+
+```swift
+Swipy(isSwipingAnItem: $isSwipingAnItem) { model in
+    Text("Swipe me!")
+} leadingActions: {
+    SwipyAction { model in
+        Button {
+            print("Pin")
+            model.unswipe()
+        } label: {
+            Image(systemName: "pin.fill")
+                .foregroundStyle(.white)
+        }
+    }
 } actions: {
     SwipyAction { model in
         Button {
@@ -118,20 +146,27 @@ Swipy(isSwipingAnItem: $isSwipingAnItem) { model in
 
 ### Properties
 
-- `swipeOffset`: The current swipe offset.
+- `swipeOffset`: The settled swipe offset.
 - `isSwiping`: A boolean that indicates whether an item is being swiped.
 - `isScrolling`: A boolean that indicates whether the container is scrolling.
 - `isSwiped`: A boolean that indicates whether an item is swiped.
-- `swipeActionsWidth`: The width of the swipe actions view.
+- `swipedEdge`: The currently swiped edge.
+- `swipeActionsWidth`: The width of the trailing swipe actions view.
+- `leadingSwipeActionsWidth`: The width of the leading swipe actions view.
+- `trailingSwipeActionsWidth`: The width of the trailing swipe actions view.
 - `contentSize`: The size of the content view.
 - `swipeActionsMargin`: The margin for swipe actions.
 - `swipeThreshold`: The swipe threshold calculator function.
+- `leadingSwipeThreshold`: The leading swipe threshold calculator function.
 - `swipeBehavior`: The behavior for swipe actions.
 - `scrollBehavior`: The behavior for scroll actions.
+- `repeatedSwipeBehavior`: The behavior for same-direction swipes on an already swiped item.
+- `directionLock`: The horizontal and vertical gesture locking configuration.
 
 ### Methods
 
-- `swipe()`: Swipes the item.
+- `swipe()`: Swipes the item to reveal trailing actions.
+- `swipe(_ edge: SwipySwipeEdge)`: Swipes the item to reveal the selected edge.
 - `unswipe()`: Unswipes the item.
 
 > [!NOTE]
@@ -188,11 +223,15 @@ It takes these arguments:
 
 - `isSwipingAnItem`: A binding that indicates whether an item is being swiped.
 - `content`: A closure that returns the view to be swiped.
-- `actions`: A closure that returns a view for each action.
+- `leadingActions`: A closure that returns a view for leading actions.
+- `actions`: A closure that returns a view for trailing actions.
 - (Optional) `SwipyActionsMargin`: The margin for swipe actions, a `SwipyHorizontalMargin` struct.
 - (Optional) `swipeThreshold`: The swipe threshold calculator function.
+- (Optional) `leadingSwipeThreshold`: The leading swipe threshold calculator function.
 - (Optional) `swipeBehavior`: The behavior for swipe actions, a `SwipySwipeBehavior` struct.
 - (Optional) `scrollBehavior`: The behavior for scroll actions, a `SwipyScrollBehavior` struct.
+- (Optional) `repeatedSwipeBehavior`: The behavior for same-direction swipes after an item is already swiped.
+- (Optional) `directionLock`: The direction lock configuration for horizontal swipes and vertical scrolls.
 
 #### Option: `SwipyActionsMargin: SwipyHorizontalMargin(leading: Double, trailing: Double)`
 
@@ -206,10 +245,17 @@ It takes these arguments:
 
 Function that calculates the swipe threshold. The function takes a `SwipyModel` and returns a `Double`.
 
-You'll most likely want to use calculate the swipe threshold based on the width of the swipe actions view that is a property in the `SwipyModel`. (`\.SwipyActionsWidth`)
+You'll most likely want to calculate the swipe threshold based on the width of the swipe actions view that is a property in the `SwipyModel`. (`\.swipeActionsWidth`)
 
 > [!NOTE]
-> Default: `\.SwipyActionsWidth`
+> Default: `\.swipeActionsWidth`
+
+#### Option: `leadingSwipeThreshold: (SwipyModel) -> Double`
+
+Function that calculates the leading swipe threshold. The function takes a `SwipyModel` and returns a `Double`.
+
+> [!NOTE]
+> Default: `\.leadingSwipeActionsWidth`
 
 #### Option: `swipeBehavior: SwipySwipeBehavior`
 
@@ -218,6 +264,14 @@ The behavior for swipe actions. You can use predefined behaviors or create custo
 #### Option: `scrollBehavior: SwipyScrollBehavior`
 
 The behavior for scroll actions. You can use predefined behaviors or create custom ones.
+
+#### Option: `repeatedSwipeBehavior: SwipyRepeatedSwipeBehavior`
+
+The behavior when an item is already swiped and the user swipes again in the same direction. The default collapses the item and suppresses the rest of that gesture until it ends.
+
+#### Option: `directionLock: SwipyDirectionLock`
+
+The gesture direction lock configuration. It controls the minimum gesture distance and the horizontal/vertical dominance ratios used to decide whether Swipy should handle a drag or let the surrounding scroll view keep it.
 
 ### View: `SwipyAction`
 
