@@ -385,6 +385,7 @@ public struct Swipy<C, A>: View where C: View, A: View {
     @State private var activeSwipeEdge: SwipySwipeEdge?
     @State private var isCurrentGestureSuppressed = false
     @State private var scrollLockID = UUID()
+    @State private var scrollLockGeneration = 0
 
     public var body: some View {
         let currentOffsetWidth = model.isSwiping ? interactiveOffsetWidth : model.swipeOffset.width
@@ -403,8 +404,7 @@ public struct Swipy<C, A>: View where C: View, A: View {
             }
         .environmentObject(model)
         .onChange(of: model.isSwiping) { newValue in
-            isSwipingAnItem = newValue
-            scrollLockState?.setLocked(newValue, for: scrollLockID)
+            updateSwipeLock(newValue)
         }
         .onChange(of: model.leadingSwipeActionsWidth) { _ in
             syncSwipedOffsetIfNeeded()
@@ -431,7 +431,35 @@ public struct Swipy<C, A>: View where C: View, A: View {
         }
         .onDisappear {
             isSwipingAnItem = false
+            scrollLockGeneration += 1
             scrollLockState?.setLocked(false, for: scrollLockID)
+        }
+    }
+
+    private func updateSwipeLock(_ isSwiping: Bool, delayed: Bool = true) {
+        isSwipingAnItem = isSwiping
+        scrollLockGeneration += 1
+
+        let generation = scrollLockGeneration
+
+        guard isSwiping else {
+            scrollLockState?.setLocked(false, for: scrollLockID)
+            return
+        }
+
+        guard delayed else {
+            scrollLockState?.setLocked(true, for: scrollLockID)
+            return
+        }
+
+        Task { @MainActor in
+            await Task.yield()
+
+            guard scrollLockGeneration == generation, model.isSwiping else {
+                return
+            }
+
+            scrollLockState?.setLocked(true, for: scrollLockID)
         }
     }
 
@@ -561,6 +589,7 @@ public struct Swipy<C, A>: View where C: View, A: View {
         guard !isCurrentGestureSuppressed else {
             model.isSwiping = false
             model.isScrolling = false
+            updateSwipeLock(false)
             resetGestureTracking()
             return
         }
@@ -574,7 +603,7 @@ public struct Swipy<C, A>: View where C: View, A: View {
 
         let targetEdge = targetSwipeEdge(offsetWidth: interactiveOffsetWidth)
 
-        withAnimation(.bouncy) {
+        withAnimation(.snappy(duration: 0.24, extraBounce: 0.25)) {
             if let targetEdge {
                 model.swipe(targetEdge)
             } else {
@@ -586,6 +615,7 @@ public struct Swipy<C, A>: View where C: View, A: View {
         }
 
         model.isScrolling = false
+        updateSwipeLock(false)
         resetGestureTracking(keepingInteractiveOffset: true)
     }
 
@@ -606,6 +636,7 @@ public struct Swipy<C, A>: View where C: View, A: View {
             gestureAxis = .horizontal
             gestureStartOffsetWidth = model.swipeOffset.width
             interactiveOffsetWidth = gestureStartOffsetWidth
+            updateSwipeLock(true, delayed: false)
             return true
         }
 
@@ -663,6 +694,7 @@ public struct Swipy<C, A>: View where C: View, A: View {
             interactiveOffsetWidth = .zero
             model.isSwiping = false
         }
+        updateSwipeLock(false)
     }
 
     private func clampedOffset(_ offsetWidth: Double) -> Double {
